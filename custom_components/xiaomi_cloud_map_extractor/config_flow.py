@@ -311,13 +311,18 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             else:
                 unique_id = format_mac(self._cloud_vacuum.mac)
 
-                existing_entry = next(
-                    filter(
-                        lambda entry: entry.data[CONF_HOST] == host,
-                        self._async_current_entries(include_ignore=False),
-                    ),
-                    None,
-                )
+                if self.source == SOURCE_REAUTH:
+                    # Update the entry that requested reauth, even if the vacuum's
+                    # IP no longer matches the host stored in that entry.
+                    existing_entry = self._get_reauth_entry()
+                else:
+                    existing_entry = next(
+                        filter(
+                            lambda entry: entry.data.get(CONF_HOST) == host,
+                            self._async_current_entries(include_ignore=False),
+                        ),
+                        None,
+                    )
                 await self.async_set_unique_id(
                     unique_id, raise_on_progress=False
                 )
@@ -325,7 +330,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                 self._connector.server = self._cloud_vacuum.server
                 await save_connector_config(self.hass, self._cloud_vacuum.mac, self._connector.to_config())
-                if existing_entry or self.source == SOURCE_REAUTH:
+                if existing_entry is not None:
                     data = existing_entry.data.copy()
                     data[CONF_HOST] = host
                     data[CONF_TOKEN] = token
