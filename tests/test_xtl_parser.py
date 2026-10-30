@@ -237,3 +237,72 @@ def test_path_deferred_when_field1_present(raw_map_bytes):
     assert outer["fields"][1]  # guard: fixture really does carry a path field
     md = _parser().parse(raw_map_bytes)
     assert md.path is None
+
+
+def _stored_lz4(body: bytes) -> bytes:
+    """LZ4 block holding `body` as a single literal run (see `_trace_field`)."""
+    out = bytearray()
+    if len(body) < 15:
+        out.append(len(body) << 4)
+    else:
+        out.append(0xF0)
+        remaining = len(body) - 15
+        while remaining >= 255:
+            out.append(255)
+            remaining -= 255
+        out.append(remaining)
+    return bytes(out + body)
+
+
+def _with_rooms(raw_map_bytes: bytes) -> dict:
+    # fields[3]: room metadata, fields[9]: outline polygons keyed by room_id. Both
+    # store points transposed relative to positions: (a, b) is position (b, a).
+    outer = json.loads(raw_map_bytes)
+    outer["fields"][3] = json.dumps([
+        {"id": 1, "name": "Kitchen  ", "type": "4", "centerX": 330, "centerY": 420, "room_id": 7},
+        {"id": 2, "name": "", "type": "", "centerX": 400, "centerY": 390, "room_id": 3},
+        {"id": 3, "name": "No outline", "centerX": 1, "centerY": 1, "room_id": 9},
+    ])
+    outer["fields"] += [""] * (10 - len(outer["fields"]))
+    outer["fields"][9] = [
+        {"id": 7, "data": [303, 397, 303, 444, 360, 444, 360, 397]},
+        {"id": 3, "data": [380, 380, 380, 400, 420, 400, 420, 380]},
+    ]
+    return outer
+
+
+def test_rooms_parsed_from_fields_3_and_9_in_position_frame(raw_map_bytes):
+    md = _parser().parse(json.dumps(_with_rooms(raw_map_bytes)).encode())
+
+    assert set(md.rooms) == {7, 3}  # keyed by room_id; a room without an outline is skipped
+    kitchen = md.rooms[7]
+    assert (kitchen.x0, kitchen.y0, kitchen.x1, kitchen.y1) == (397, 303, 444, 360)
+    assert kitchen.number == 7
+    assert kitchen.name == "Kitchen"  # the app pads some names with spaces
+    assert (kitchen.pos_x, kitchen.pos_y) == (420, 330)
+    assert md.rooms[3].name is None  # unnamed: nothing for ROOM_NAMES to draw
+
+
+def test_rooms_absent_or_malformed_cost_only_the_rooms(raw_map_bytes):
+    md = _parser().parse(raw_map_bytes)  # fixture: fields[3] empty, no fields[9]
+    assert md.rooms is None
+
+    outer = _with_rooms(raw_map_bytes)
+    outer["fields"][3] = "{not json"
+    md = _parser().parse(json.dumps(outer).encode())
+    assert md.rooms is None
+    assert md.image is not None and not md.image.is_empty
+
+
+def test_vacuum_room_read_from_grid_under_the_robot(raw_map_bytes, field0):
+    outer = json.loads(raw_map_bytes)
+    assert _parser().parse(raw_map_bytes).vacuum_room is None  # fixture has no room cells
+
+    width, height = field0["width"], field0["height"]
+    grid = bytearray([2]) * (width * height)
+    col, row = _expected_pixel(field0, 387, 399)  # fields[2], the robot
+    grid[(height - 1 - row) * width + col] = 5
+    meta = dict(field0, map=base64.b64encode(_stored_lz4(bytes(grid))).decode(), lz4Len=len(grid))
+    outer["fields"][0] = base64.b64encode(json.dumps(meta).encode()).decode()
+
+    assert _parser().parse(json.dumps(outer).encode()).vacuum_room == 5

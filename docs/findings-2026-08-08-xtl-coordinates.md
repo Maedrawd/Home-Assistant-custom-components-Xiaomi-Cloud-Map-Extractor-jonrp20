@@ -24,8 +24,10 @@ device `y` is a top-down row index on the `totalHeight`-row canvas. Flipping y w
 **The device transposes x/y between rooms and positions.** The room data in `fields[3]` and
 `fields[9]` uses the mirror image of the above (`centerX` is the row, `centerY` the column).
 Both were verified independently, so this is a real quirk of the format, not a mistake in
-one of the fits. Only the position frame matters to the parser, since rooms are consumed as
-grid values.
+one of the fits. The parser swaps room points back into the position frame when it builds
+`map_data.rooms`: on a real capture with four rooms, all 351 outline vertices then sit next to
+a cell carrying their own `room_id`, and every `(centerY, centerX)` lands inside its room;
+read untransposed, 85% of the vertices miss.
 
 ### How it was pinned — after three wrong guesses
 
@@ -129,9 +131,6 @@ in this format.
 
 ## Still open
 
-- **`map_data.rooms` is not populated.** The room *segments* now render, but rooms are not
-  exposed as objects, so room names, per-room sensors and `Drawable.ROOM_NAMES` still do
-  nothing. Would need bounding boxes and names per segment id.
 - **Grid value 2 is unidentified** (270 cells, small scattered patches). Left as
   MAP_INSIDE. Possibly obstacles or furniture.
 - **Marker heading semantics are unverified.** The angle is correctly scaled, but whether

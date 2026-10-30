@@ -9,7 +9,7 @@ from typing import Any
 from PIL import Image
 
 from vacuum_map_parser_base.config.color import SupportedColor
-from vacuum_map_parser_base.map_data import ImageData, MapData, Path, Point
+from vacuum_map_parser_base.map_data import ImageData, MapData, Path, Point, Room
 from vacuum_map_parser_base.map_data_parser import MapDataParser
 
 _LOGGER = logging.getLogger(__name__)
@@ -127,8 +127,8 @@ class XtlMapDataParser(MapDataParser):
         # this (centerX is the row, centerY the column). Both were verified
         # independently -- the room polygons fit their grid cells to the exact
         # integer on all 16 bounding-box bounds, and the trace fit is below -- so the
-        # device really does transpose x/y between rooms and positions. Only the
-        # position frame matters here, since rooms are consumed as grid values.
+        # device really does transpose x/y between rooms and positions;
+        # `_parse_rooms` swaps them back into this frame.
         #
         # How this was pinned, after three wrong guesses: fields[1] decodes to
         # 7-byte records (x int16 LE, y int16 LE, angle int16 LE, flags) and its
@@ -160,6 +160,8 @@ class XtlMapDataParser(MapDataParser):
         self._warn_if_off_canvas(map_data.charger, "charger", map_data.image)
         self._warn_if_off_canvas(map_data.vacuum_position, "vacuum", map_data.image)
         map_data.path = self._decode_path(outer)
+        map_data.rooms = self._parse_rooms(outer)
+        map_data.vacuum_room = self._room_at(map_data.vacuum_position, meta, grid)
 
         if map_data.image is not None and not map_data.image.is_empty:
             self._image_generator.draw_map(map_data)
@@ -213,6 +215,57 @@ class XtlMapDataParser(MapDataParser):
             return None
         angle = value.get("a")
         return Point(value["x"], value["y"], None if angle is None else angle / _CENTIDEGREES_PER_DEGREE)
+
+    def _parse_rooms(self, outer: dict[str, Any]) -> dict[int, Room] | None:
+        """Rooms from fields[3] (metadata) and fields[9] (outline polygons).
+
+        Keyed by `room_id`, the value the room's cells carry in the grid and the id
+        the robot's start-clean (siid 17, aiid 1, type 3) expects; the per-room `id`
+        is only an index. Both fields store points TRANSPOSED relative to positions
+        (see `parse`), so every (a, b) becomes position (b, a): on a real capture this
+        puts all 351 outline vertices next to a cell of their own room, and each
+        room's (centerY, centerX) inside it, while the untransposed reading misses
+        85% of them.
+
+        A Room carries only its bounding box, as the base library expects. Must
+        never raise: bad room data should cost the rooms, not the map.
+        """
+        try:
+            infos = self._field(outer, 3)
+            if isinstance(infos, str):
+                infos = json.loads(infos) if infos else []
+            outlines = {}
+            for item in self._field(outer, 9) or []:
+                data = item.get("data") or []
+                outlines[item.get("id")] = [(b, a) for a, b in zip(data[::2], data[1::2])]
+            rooms: dict[int, Room] = {}
+            for info in infos or []:
+                room_id = info.get("room_id")
+                points = outlines.get(room_id)
+                if room_id is None or not points:
+                    continue
+                xs, ys = [p[0] for p in points], [p[1] for p in points]
+                rooms[room_id] = Room(
+                    min(xs), min(ys), max(xs), max(ys), room_id,
+                    str(info.get("name") or "").strip() or None, info.get("centerY"), info.get("centerX"),
+                )
+            return rooms or None
+        except Exception:
+            _LOGGER.debug("XTL rooms decode failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _room_at(point: Point | None, meta: dict[str, Any], grid: bytes) -> int | None:
+        """Room id of the grid cell under a position, via the mapping in `parse`."""
+        if point is None:
+            return None
+        width, height = meta["width"], meta["height"]
+        col = int(point.x) - meta["yMax"]
+        row = int(point.y) - (meta["totalHeight"] - meta["xMin"] - height)
+        if not (0 <= col < width and 0 <= row < height):
+            return None
+        value = grid[(height - 1 - row) * width + col]
+        return value if value >= _FIRST_ROOM_VALUE else None
 
     def _decode_path(self, outer: dict[str, Any]) -> Path | None:
         """Decode the vacuum path from fields[1].
